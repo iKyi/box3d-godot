@@ -8,6 +8,7 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/color.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
@@ -506,6 +507,14 @@ public:
 	//   { hit: bool, position: Vector3, normal: Vector3,
 	//     fraction: float, collider: Box3DBody }
 	Dictionary raycast(const Vector3 &p_from, const Vector3 &p_to,
+			uint64_t p_mask = B3_DEFAULT_MASK_BITS, uint64_t p_layer = B3_DEFAULT_CATEGORY_BITS);
+
+	// Whether anything in p_mask lies on each segment of p_pairs, one crossing for many
+	// sightlines (Collapse patch). Pairs are consecutive from, to points; byte i is 1 when
+	// segment i is blocked. Answers exactly raycast()'s "hit" for each segment, initial overlap
+	// ignored as b3World_CastRayClosest ignores it, but stops at the first hit and builds no
+	// reply. An odd-length input is refused with an empty result.
+	PackedByteArray occluded_many(const PackedVector3Array &p_pairs,
 			uint64_t p_mask = B3_DEFAULT_MASK_BITS, uint64_t p_layer = B3_DEFAULT_CATEGORY_BITS);
 
 	// Maps a shape to the Box3DBody that owns it (via userData). Public so the
