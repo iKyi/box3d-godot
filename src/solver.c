@@ -23,6 +23,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 // these are useful for solver testing
 #define ITERATIONS 1
@@ -328,13 +329,21 @@ typedef struct b3ContinuousContext
 
 	int visitCount;
 
+	// The shapes a swept query met, gathered before any is tested (Collapse patch): a time of impact
+	// is searched up to the soonest found so far, so testing them in the tree's order, which is the
+	// world's history, moves the answer. They are tested in b3CompareShapeOrder's order instead.
+	int* met;
+	int metCount;
+	int metCapacity;
+	int metInline[64];
+
 	int distanceIterations;
 	int pushBackIterations;
 	int rootIterations;
 } b3ContinuousContext;
 
-// This is called from b3DynamicTree_Query for continuous collision
-static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* context )
+// One shape a swept query met, tested for a time of impact sooner than the soonest so far.
+static bool b3ContinuousVisit( int proxyId, uint64_t userData, void* context )
 {
 	B3_UNUSED( proxyId );
 
@@ -469,6 +478,52 @@ static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* con
 	return true;
 }
 
+// This is called from b3DynamicTree_Query for continuous collision: it only gathers the shape.
+static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* context )
+{
+	B3_UNUSED( proxyId );
+	b3ContinuousContext* continuousContext = context;
+	if ( continuousContext->metCount == continuousContext->metCapacity )
+	{
+		int capacity = 2 * continuousContext->metCapacity;
+		int* grown = b3Alloc( capacity * sizeof( int ) );
+		memcpy( grown, continuousContext->met, continuousContext->metCount * sizeof( int ) );
+		if ( continuousContext->met != continuousContext->metInline )
+		{
+			b3Free( continuousContext->met, continuousContext->metCapacity * sizeof( int ) );
+		}
+		continuousContext->met = grown;
+		continuousContext->metCapacity = capacity;
+	}
+	continuousContext->met[continuousContext->metCount] = (int)userData;
+	continuousContext->metCount += 1;
+	return true;
+}
+
+// Test every shape gathered for the current fast shape, in shape order (Collapse patch).
+static void b3ContinuousTestMet( b3ContinuousContext* continuousContext )
+{
+	const b3Shape* shapes = continuousContext->world->shapes.data;
+	int* met = continuousContext->met;
+	int count = continuousContext->metCount;
+	for ( int i = 1; i < count; ++i )
+	{
+		int moving = met[i];
+		int j = i - 1;
+		while ( j >= 0 && b3CompareShapeOrder( shapes + met[j], shapes + moving ) > 0 )
+		{
+			met[j + 1] = met[j];
+			j -= 1;
+		}
+		met[j + 1] = moving;
+	}
+	for ( int i = 0; i < count; ++i )
+	{
+		b3ContinuousVisit( B3_NULL_INDEX, (uint64_t)met[i], continuousContext );
+	}
+	continuousContext->metCount = 0;
+}
+
 // Continuous collision of dynamic versus static
 static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* taskContext, float dt )
 {
@@ -504,6 +559,8 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 	context.base = base;
 	context.fastBodySim = fastBodySim;
 	context.fraction = 1.0f;
+	context.met = context.metInline;
+	context.metCapacity = 64;
 
 	bool isBullet = ( fastBodySim->flags & b3_isBullet ) != 0;
 
@@ -544,6 +601,13 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 			b3DynamicTree_Query( kinematicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &context );
 			b3DynamicTree_Query( dynamicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &context );
 		}
+
+		b3ContinuousTestMet( &context );
+	}
+
+	if ( context.met != context.metInline )
+	{
+		b3Free( context.met, context.metCapacity * sizeof( int ) );
 	}
 
 	const float speculativeScalar = B3_SPECULATIVE_DISTANCE;

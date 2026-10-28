@@ -171,6 +171,8 @@ static b3Shape* b3CreateShapeInternal( b3World* world, b3Body* body, b3WorldTran
 	shape->filter = def->filter;
 	shape->userData = def->userData;
 	shape->userShape = NULL;
+	shape->orderKey = def->orderKey;
+	shape->orderIndex = body->shapeCount;
 	shape->flags = 0;
 	shape->flags |= def->enableSensorEvents ? b3_enableSensorEvents : 0;
 	shape->flags |= def->enableContactEvents ? b3_enableContactEvents : 0;

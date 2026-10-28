@@ -448,6 +448,7 @@ b3ShapeDef b3RecR_SHAPEDEF( b3RecReader* rdr )
 
 	def.name = b3RecR_STR( rdr );
 	(void)b3RecR_U64( rdr ); // userData placeholder
+	def.orderKey = b3RecR_U64( rdr );
 
 	int matCount = b3RecR_I32( rdr );
 	if ( matCount < 0 )

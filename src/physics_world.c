@@ -15,6 +15,7 @@
 #include "island.h"
 #include "joint.h"
 #include "parallel_for.h"
+#include "qsort.h"
 #include "platform.h"
 #include "recording.h"
 #include "scheduler.h"
@@ -819,6 +820,26 @@ static void b3RemoveNonTouchingContact( b3World* world, int setIndex, int localI
 }
 
 // Narrow-phase collision
+// Whether contact x's state change is processed before y's: by its two shapes in order, then its
+// compound child, the id only between contacts nothing else tells apart (Collapse patch).
+static bool b3ContactLess( const b3Shape* shapes, const b3Contact* x, const b3Contact* y )
+{
+	int order = b3CompareShapeOrder( shapes + x->shapeIdA, shapes + y->shapeIdA );
+	if ( order == 0 )
+	{
+		order = b3CompareShapeOrder( shapes + x->shapeIdB, shapes + y->shapeIdB );
+	}
+	if ( order != 0 )
+	{
+		return order < 0;
+	}
+	if ( x->childIndex != y->childIndex )
+	{
+		return x->childIndex < y->childIndex;
+	}
+	return x->contactId < y->contactId;
+}
+
 static void b3Collide( b3StepContext* context )
 {
 	b3World* world = context->world;
@@ -935,14 +956,47 @@ static void b3Collide( b3StepContext* context )
 	const b3Shape* shapes = world->shapes.data;
 	uint16_t worldId = world->worldId;
 
-	// Process contact state changes. Iterate over set bits
-	for ( uint32_t k = 0; k < bitSet->blockCount; ++k )
+	// Process contact state changes in shape order rather than contact id order (Collapse patch).
+	// The order a contact starts touching in decides its constraint colour, and so the order the
+	// solver takes it; contact ids come from a free list, so their order is the world's history.
+	int changedCount = b3CountSetBits( bitSet );
+	int* changed = (int*)b3StackAlloc( &world->stack, b3MaxInt( changedCount, 1 ) * sizeof( int ), "changed contacts" );
 	{
-		uint64_t bits = bitSet->bits[k];
-		while ( bits != 0 )
+		int changedIndex = 0;
+		for ( uint32_t k = 0; k < bitSet->blockCount; ++k )
 		{
-			uint32_t ctz = b3CTZ64( bits );
-			int contactId = (int)( 64 * k + ctz );
+			uint64_t bits = bitSet->bits[k];
+			while ( bits != 0 )
+			{
+				uint32_t ctz = b3CTZ64( bits );
+				changed[changedIndex] = (int)( 64 * k + ctz );
+				changedIndex += 1;
+				bits = bits & ( bits - 1 );
+			}
+		}
+		B3_ASSERT( changedIndex == changedCount );
+
+		const b3Contact* orderContacts = world->contacts.data;
+#define LESS( i, j ) b3ContactLess( shapes, orderContacts + changed[(int)( i )], orderContacts + changed[(int)( j )] )
+#define SWAP( i, j )                                                                                                             \
+	do                                                                                                                           \
+	{                                                                                                                            \
+		int tmp_ = changed[(int)( i )];                                                                                          \
+		changed[(int)( i )] = changed[(int)( j )];                                                                               \
+		changed[(int)( j )] = tmp_;                                                                                              \
+	}                                                                                                                            \
+	while ( 0 )
+
+		QSORT( changedCount, LESS, SWAP );
+
+#undef LESS
+#undef SWAP
+	}
+
+	for ( int changedIndex = 0; changedIndex < changedCount; ++changedIndex )
+	{
+		{
+			int contactId = changed[changedIndex];
 
 			b3Contact* contact = b3Array_Get( world->contacts, contactId );
 			B3_ASSERT( contact->setIndex == b3_awakeSet );
@@ -1022,11 +1076,10 @@ static void b3Collide( b3StepContext* context )
 				b3RemoveContactFromGraph( world, bodyIdA, bodyIdB, colorIndex, localIndex, isMeshContact );
 				contact = NULL;
 			}
-
-			// Clear the smallest set bit
-			bits = bits & ( bits - 1 );
 		}
 	}
+
+	b3StackFree( &world->stack, changed );
 
 	b3ValidateSolverSets( world );
 	b3ValidateContacts( world );

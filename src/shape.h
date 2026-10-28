@@ -47,6 +47,11 @@ typedef struct b3Shape
 	void* userData;
 	void* userShape;
 
+	// b3ShapeDef::orderKey, and this shape's ordinal on its body when it was made: shapes sharing a
+	// key are ordered by when their body took them, never by id.
+	uint64_t orderKey;
+	int orderIndex;
+
 	uint32_t nameId;
 	uint16_t generation;
 
@@ -136,6 +141,21 @@ static inline int b3GetHeightFieldTriangleCount( const b3HeightFieldData* height
 // Mesh
 b3Triangle b3GetMeshTriangle( const b3Mesh* mesh, int triangleIndex );
 bool b3IsValidMesh( const b3MeshData* meshData );
+
+// Negative when a goes before b in the solver's orders: by key, then by the ordinal on the body,
+// and by id only between shapes the application gave nothing to tell apart (Collapse patch).
+static inline int b3CompareShapeOrder( const b3Shape* a, const b3Shape* b )
+{
+	if ( a->orderKey != b->orderKey )
+	{
+		return a->orderKey < b->orderKey ? -1 : 1;
+	}
+	if ( a->orderIndex != b->orderIndex )
+	{
+		return a->orderIndex < b->orderIndex ? -1 : 1;
+	}
+	return a->id < b->id ? -1 : ( a->id > b->id ? 1 : 0 );
+}
 
 static inline bool b3ShouldShapesCollide( b3Filter filterA, b3Filter filterB )
 {

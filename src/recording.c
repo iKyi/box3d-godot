@@ -322,7 +322,7 @@ _Static_assert( sizeof( void* ) != 8 || sizeof( b3ExplosionDef ) == 32 || sizeof
 				"b3ExplosionDef changed: update b3RecW_EXPLOSIONDEF and b3RecR_EXPLOSIONDEF together" );
 _Static_assert( sizeof( void* ) != 8 || sizeof( b3BodyDef ) == 112 || sizeof( b3BodyDef ) == 128,
 				"b3BodyDef changed: update b3RecW_BODYDEF and b3RecR_BODYDEF together" );
-_Static_assert( sizeof( void* ) != 8 || sizeof( b3ShapeDef ) == 120,
+_Static_assert( sizeof( void* ) != 8 || sizeof( b3ShapeDef ) == 128,
 				"b3ShapeDef changed: update b3RecW_SHAPEDEF and b3RecR_SHAPEDEF together" );
 _Static_assert( sizeof( void* ) != 8 || sizeof( b3ParallelJointDef ) == 128,
 				"b3ParallelJointDef changed: update b3RecW_PARALLELJOINTDEF and its reader together" );
@@ -383,6 +383,7 @@ void b3RecW_SHAPEDEF( b3RecBuffer* buf, b3ShapeDef v )
 
 	// userData: not preserved
 	b3RecW_U64( buf, 0u );
+	b3RecW_U64( buf, v.orderKey );
 	// Per-triangle materials: length-prefixed so the reader can rebuild the array.
 	// Guard NULL so a default def (materialCount=0, materials=NULL) round-trips cleanly.
 	int matCount = ( v.materials != NULL ) ? v.materialCount : 0;

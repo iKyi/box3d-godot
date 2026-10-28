@@ -479,6 +479,13 @@ typedef struct b3ShapeDef
 	/// Use this to store application specific shape data.
 	void* userData;
 
+	/// Where this shape stands in every order the solver takes, ahead of its id (Collapse patch).
+	/// Shape and contact ids come from free lists, so ordering by them lets a world's creation
+	/// history reach the numbers; a key the application derives from what the shape stands for
+	/// gives the same pairs, the same contact orientation and the same constraint colours in any
+	/// world that holds the same shapes. Zero for every shape leaves the id order alone.
+	uint64_t orderKey;
+
 	/// Surface material used on mesh shapes per triangle. Ignored for convex shapes. Ignored for compound shapes.
 	b3SurfaceMaterial* materials;
 

@@ -340,6 +340,42 @@ static void b3FlushCandidatePairs( b3PairContext* context )
 	}
 }
 
+// A pair key's two shapes, the one first in b3CompareShapeOrder as first (Collapse patch).
+static void b3OrderedPair( const b3Shape* shapes, uint64_t key, const b3Shape** first, const b3Shape** second )
+{
+	const b3Shape* a = shapes + (int)( ( key >> ( 64 - B3_SHAPE_POWER ) ) & B3_SHAPE_MASK );
+	const b3Shape* b = shapes + (int)( ( key >> ( 64 - 2 * B3_SHAPE_POWER ) ) & B3_SHAPE_MASK );
+	bool flip = b3CompareShapeOrder( a, b ) > 0;
+	*first = flip ? b : a;
+	*second = flip ? a : b;
+}
+
+// Whether pair key x goes before y: by both shapes' order, then the compound child, the key only
+// between pairs nothing else tells apart. Ordering by the key alone is ordering by shape ids, which
+// free lists hand out by history (Collapse patch).
+static bool b3PairLess( const b3Shape* shapes, uint64_t x, uint64_t y )
+{
+	const b3Shape *x1, *x2, *y1, *y2;
+	b3OrderedPair( shapes, x, &x1, &x2 );
+	b3OrderedPair( shapes, y, &y1, &y2 );
+	int order = b3CompareShapeOrder( x1, y1 );
+	if ( order == 0 )
+	{
+		order = b3CompareShapeOrder( x2, y2 );
+	}
+	if ( order != 0 )
+	{
+		return order < 0;
+	}
+	uint64_t childX = x & B3_CHILD_MASK;
+	uint64_t childY = y & B3_CHILD_MASK;
+	if ( childX != childY )
+	{
+		return childX < childY;
+	}
+	return x < y;
+}
+
 B3_FORCE_INLINE void b3AddCandidatePair( int shapeIdA, int shapeIdB, b3PairContext* context )
 {
 	// Follow shape index order.
@@ -731,7 +767,8 @@ void b3UpdateBroadPhasePairs( b3World* world )
 	B3_ASSERT( keyCount == pairCount );
 
 	{
-#define LESS( i, j ) ( pairKeys[(int)( i )] < pairKeys[(int)( j )] )
+		const b3Shape* orderShapes = world->shapes.data;
+#define LESS( i, j ) b3PairLess( orderShapes, pairKeys[(int)( i )], pairKeys[(int)( j )] )
 #define SWAP( i, j )                                                                                                             \
 	do                                                                                                                           \
 	{                                                                                                                            \
@@ -767,6 +804,15 @@ void b3UpdateBroadPhasePairs( b3World* world )
 
 		b3Shape* shapeA = b3Array_Get( world->shapes, shapeIdA );
 		b3Shape* shapeB = b3Array_Get( world->shapes, shapeIdB );
+
+		// A contact's A is the shape first in order, not the lower id (Collapse patch). A compound
+		// is put first by type in b3CreateContact whatever this decides.
+		if ( b3CompareShapeOrder( shapeA, shapeB ) > 0 )
+		{
+			b3Shape* swap = shapeA;
+			shapeA = shapeB;
+			shapeB = swap;
+		}
 
 		b3CreateContact( world, shapeA, shapeB, childIndex );
 	}

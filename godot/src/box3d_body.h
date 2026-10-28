@@ -205,6 +205,8 @@ private:
 	// 0.05 * b3GetLengthUnitsPerMeter() (src/types.c:37), i.e. 0.05 m/s at the
 	// default length unit.
 	double sleep_threshold = 0.05;
+	// b3ShapeDef::orderKey for every shape this body builds (Collapse patch).
+	int64_t order_key = 0;
 	bool can_sleep = true; // b3BodyDef.enableSleep / b3Body_EnableSleep
 	bool enabled = true; // b3BodyDef.isEnabled / b3Body_Enable|Disable
 	bool contact_monitor = false; // b3ShapeDef.enableContactEvents
@@ -647,6 +649,8 @@ public:
 	bool get_can_sleep() const;
 	void set_sleep_threshold(double p_threshold);
 	double get_sleep_threshold() const;
+	void set_order_key(int64_t p_key);
+	int64_t get_order_key() const;
 	void set_enabled(bool p_enabled);
 	bool get_enabled() const;
 	void set_contact_monitor(bool p_enabled);
