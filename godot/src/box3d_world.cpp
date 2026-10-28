@@ -1135,6 +1135,37 @@ PackedByteArray Box3DWorld::occluded_many(const PackedVector3Array &p_pairs, uin
 	return result;
 }
 
+PackedVector3Array Box3DWorld::raycast_points(const PackedVector3Array &p_pairs, uint64_t p_mask, uint64_t p_layer) {
+	join_async_step();
+	PackedVector3Array result;
+	if (p_pairs.size() % 2 != 0) {
+		UtilityFunctions::push_error("Box3DWorld.raycast_points: pairs must be consecutive from, to points; got an odd count.");
+		return result;
+	}
+	const int64_t count = p_pairs.size() / 2;
+	result.resize(count);
+	const Vector3 missed(NAN, NAN, NAN);
+	result.fill(missed);
+	ensure_world();
+	if (count == 0 || !b3World_IsValid(world_id)) {
+		return result;
+	}
+	b3QueryFilter filter = b3DefaultQueryFilter();
+	filter.maskBits = p_mask;
+	filter.categoryBits = p_layer;
+	const Vector3 *pairs = p_pairs.ptr();
+	Vector3 *out = result.ptrw();
+	for (int64_t i = 0; i < count; ++i) {
+		const Vector3 &from = pairs[2 * i];
+		// raycast()'s call, so the point is its "position" exactly.
+		b3RayResult r = b3World_CastRayClosest(world_id, to_b3_pos(from), to_b3(pairs[2 * i + 1] - from), filter);
+		if (r.hit) {
+			out[i] = to_gd_pos(r.point);
+		}
+	}
+	return result;
+}
+
 namespace {
 
 struct OverlapContext {
@@ -2916,6 +2947,7 @@ void Box3DWorld::_bind_methods() {
 	// filter these queries used before the category half existed.
 	ClassDB::bind_method(D_METHOD("raycast", "from", "to", "collision_mask", "collision_layer"), &Box3DWorld::raycast, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
 	ClassDB::bind_method(D_METHOD("occluded_many", "pairs", "collision_mask", "collision_layer"), &Box3DWorld::occluded_many, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
+	ClassDB::bind_method(D_METHOD("raycast_points", "pairs", "collision_mask", "collision_layer"), &Box3DWorld::raycast_points, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
 	ClassDB::bind_method(D_METHOD("raycast_all", "from", "to", "collision_mask", "collision_layer"), &Box3DWorld::raycast_all, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
 	ClassDB::bind_method(D_METHOD("overlap_sphere", "center", "radius", "collision_mask", "collision_layer"), &Box3DWorld::overlap_sphere, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
 	ClassDB::bind_method(D_METHOD("overlap_box", "center", "size", "collision_mask", "collision_layer"), &Box3DWorld::overlap_box, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));

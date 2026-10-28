@@ -517,6 +517,13 @@ public:
 	PackedByteArray occluded_many(const PackedVector3Array &p_pairs,
 			uint64_t p_mask = B3_DEFAULT_MASK_BITS, uint64_t p_layer = B3_DEFAULT_CATEGORY_BITS);
 
+	// Where the closest hit along each segment of p_pairs lies, one crossing for many rays
+	// (Collapse patch). Pairs are consecutive from, to points; point i is raycast()'s "position"
+	// for segment i, bit for bit (the same b3World_CastRayClosest), or all NAN on a miss. No reply
+	// Dictionary is built. An odd-length input is refused with an empty result.
+	PackedVector3Array raycast_points(const PackedVector3Array &p_pairs,
+			uint64_t p_mask = B3_DEFAULT_MASK_BITS, uint64_t p_layer = B3_DEFAULT_CATEGORY_BITS);
+
 	// Maps a shape to the Box3DBody that owns it (via userData). Public so the
 	// query callbacks can use it.
 	Box3DBody *body_from_shape(b3ShapeId p_shape);
