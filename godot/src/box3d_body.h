@@ -207,6 +207,9 @@ private:
 	double sleep_threshold = 0.05;
 	// b3ShapeDef::orderKey for every shape this body builds (Collapse patch).
 	int64_t order_key = 0;
+	// Who this body belongs to, for shape_cast_many's per-entry ignore and its answer
+	// (Collapse patch). Not Node::owner, which is the scene owner.
+	int64_t cast_owner = 0;
 	bool can_sleep = true; // b3BodyDef.enableSleep / b3Body_EnableSleep
 	bool enabled = true; // b3BodyDef.isEnabled / b3Body_Enable|Disable
 	bool contact_monitor = false; // b3ShapeDef.enableContactEvents
@@ -651,6 +654,8 @@ public:
 	double get_sleep_threshold() const;
 	void set_order_key(int64_t p_key);
 	int64_t get_order_key() const;
+	void set_cast_owner(int64_t p_owner);
+	int64_t get_cast_owner() const;
 	void set_enabled(bool p_enabled);
 	bool get_enabled() const;
 	void set_contact_monitor(bool p_enabled);

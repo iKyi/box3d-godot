@@ -524,6 +524,25 @@ public:
 	PackedVector3Array raycast_points(const PackedVector3Array &p_pairs,
 			uint64_t p_mask = B3_DEFAULT_MASK_BITS, uint64_t p_layer = B3_DEFAULT_CATEGORY_BITS);
 
+	// Many casts in one crossing, each its own shape, filter and ignored owners (Collapse patch).
+	// p_rows: SHAPE_CAST_ROW doubles an entry (GDScript's float, so a radius is the caller's own): kind (0 ray, 1 sphere, 2 capsule, 3 box), a, b, c,
+	// then a Basis as its x, y, z columns. Sphere: a the radius. Capsule: a the radius, b the whole
+	// height caps included, standing along the basis' y. Box: a, b, c the whole extent along the
+	// basis' axes, cast as the hull of its corners. p_motions: from, to pairs, from the shape's
+	// centre. p_filters: SHAPE_CAST_FILTER ints an entry: mask, layer, two ignored cast_owners
+	// (0 none). Each answer is the matching single call's, bit for bit, with the ignored owners'
+	// bodies passed through: raycast (a start inside skipped), shape_cast_sphere,
+	// shape_cast_capsule, shape_cast_convex. Returns [PackedFloat32Array, PackedInt64Array]:
+	// SHAPE_CAST_FOUND floats an entry (hit 0/1, fraction, point xyz, normal xyz) and
+	// SHAPE_CAST_WHO ints (the body's collision_layer, its cast_owner, its instance id; 0 on a
+	// miss or a body-less shape). A malformed input is refused with empty arrays.
+	static constexpr int SHAPE_CAST_ROW = 13;
+	static constexpr int SHAPE_CAST_FILTER = 4;
+	static constexpr int SHAPE_CAST_FOUND = 8;
+	static constexpr int SHAPE_CAST_WHO = 3;
+	Array shape_cast_many(const PackedFloat64Array &p_rows, const PackedVector3Array &p_motions,
+			const PackedInt64Array &p_filters);
+
 	// Maps a shape to the Box3DBody that owns it (via userData). Public so the
 	// query callbacks can use it.
 	Box3DBody *body_from_shape(b3ShapeId p_shape);

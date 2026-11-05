@@ -2697,6 +2697,17 @@ int64_t Box3DBody::get_order_key() const {
 	return order_key;
 }
 
+// Whose body this is to Box3DWorld.shape_cast_many (Collapse patch): an entry naming it as ignored
+// never meets this body, and a hit on it answers it. Read at query time, so it may change at any
+// point; 0 is nobody.
+void Box3DBody::set_cast_owner(int64_t p_owner) {
+	cast_owner = p_owner;
+}
+
+int64_t Box3DBody::get_cast_owner() const {
+	return cast_owner;
+}
+
 void Box3DBody::set_enabled(bool p_enabled) {
 	enabled = p_enabled;
 	refresh_gizmos(); // slate gray when disabled, as upstream draws it
@@ -3117,6 +3128,8 @@ void Box3DBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_sleep_threshold"), &Box3DBody::get_sleep_threshold);
 	ClassDB::bind_method(D_METHOD("set_order_key", "key"), &Box3DBody::set_order_key);
 	ClassDB::bind_method(D_METHOD("get_order_key"), &Box3DBody::get_order_key);
+	ClassDB::bind_method(D_METHOD("set_cast_owner", "owner"), &Box3DBody::set_cast_owner);
+	ClassDB::bind_method(D_METHOD("get_cast_owner"), &Box3DBody::get_cast_owner);
 	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &Box3DBody::set_enabled);
 	ClassDB::bind_method(D_METHOD("get_enabled"), &Box3DBody::get_enabled);
 	ClassDB::bind_method(D_METHOD("set_contact_monitor", "enabled"), &Box3DBody::set_contact_monitor);
@@ -3187,6 +3200,7 @@ void Box3DBody::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "can_sleep"), "set_can_sleep", "get_can_sleep");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sleep_threshold", PROPERTY_HINT_RANGE, "0,1,0.001,or_greater"), "set_sleep_threshold", "get_sleep_threshold");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "order_key"), "set_order_key", "get_order_key");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "cast_owner"), "set_cast_owner", "get_cast_owner");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "get_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "contact_monitor"), "set_contact_monitor", "get_contact_monitor");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "sensor_events"), "set_sensor_events", "get_sensor_events");

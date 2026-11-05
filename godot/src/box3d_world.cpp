@@ -1546,6 +1546,152 @@ Dictionary Box3DWorld::shape_cast_convex(const PackedVector3Array &p_points, con
 	return run_cast_proxy(convex_proxy(p_points), p_motion, p_mask, p_layer);
 }
 
+namespace {
+
+// shape_cast_many's per-entry context: the closest hit not on an ignored owner's body.
+struct ManyCastContext {
+	Box3DWorld *world;
+	int64_t ignored[2];
+	bool skip_start_inside;
+	bool hit = false;
+	b3Pos point;
+	b3Vec3 normal;
+	float fraction = 1.0f;
+	Box3DBody *body = nullptr;
+};
+
+// cast_result_cb (and for a ray b3RayCastClosestFcn) with the ignored owners filtered: -1 passes a
+// shape over without clipping, exactly as a body whose category was taken off is never reported.
+float many_cast_cb(b3ShapeId p_shape, b3Pos p_point, b3Vec3 p_normal, float p_fraction, uint64_t, int, int, void *p_context) {
+	ManyCastContext *ctx = static_cast<ManyCastContext *>(p_context);
+	if (ctx->skip_start_inside && p_fraction == 0.0f) {
+		return -1.0f;
+	}
+	Box3DBody *body = ctx->world->body_from_shape(p_shape);
+	if (body != nullptr) {
+		const int64_t owner = body->get_cast_owner();
+		if (owner != 0 && (owner == ctx->ignored[0] || owner == ctx->ignored[1])) {
+			return -1.0f;
+		}
+	}
+	ctx->hit = true;
+	ctx->point = p_point;
+	ctx->normal = p_normal;
+	ctx->fraction = p_fraction;
+	ctx->body = body;
+	return p_fraction;
+}
+
+} // namespace
+
+Array Box3DWorld::shape_cast_many(const PackedFloat64Array &p_rows, const PackedVector3Array &p_motions,
+		const PackedInt64Array &p_filters) {
+	join_async_step();
+	PackedFloat32Array found;
+	PackedInt64Array who;
+	Array result;
+	const int64_t count = p_rows.size() / SHAPE_CAST_ROW;
+	if (p_rows.size() % SHAPE_CAST_ROW != 0 || p_motions.size() != count * 2 || p_filters.size() != count * SHAPE_CAST_FILTER) {
+		UtilityFunctions::push_error("Box3DWorld.shape_cast_many: rows, motions and filters must describe the same entries (",
+				SHAPE_CAST_ROW, " floats, 2 points, ", SHAPE_CAST_FILTER, " ints each).");
+		result.push_back(found);
+		result.push_back(who);
+		return result;
+	}
+	found.resize(count * SHAPE_CAST_FOUND);
+	found.fill(0.0f);
+	who.resize(count * SHAPE_CAST_WHO);
+	who.fill(0);
+	ensure_world();
+	if (count == 0 || !b3World_IsValid(world_id)) {
+		result.push_back(found);
+		result.push_back(who);
+		return result;
+	}
+	const double *rows = p_rows.ptr();
+	const Vector3 *motions = p_motions.ptr();
+	const int64_t *filters = p_filters.ptr();
+	float *out = found.ptrw();
+	int64_t *out_who = who.ptrw();
+	for (int64_t i = 0; i < count; ++i) {
+		const double *row = rows + i * SHAPE_CAST_ROW;
+		const int64_t *with = filters + i * SHAPE_CAST_FILTER;
+		const Vector3 &from = motions[2 * i];
+		const Vector3 &to = motions[2 * i + 1];
+		const int kind = (int)row[0];
+		const Basis turn(Vector3((real_t)row[4], (real_t)row[5], (real_t)row[6]), Vector3((real_t)row[7], (real_t)row[8], (real_t)row[9]),
+				Vector3((real_t)row[10], (real_t)row[11], (real_t)row[12]));
+		b3QueryFilter filter = b3DefaultQueryFilter();
+		filter.maskBits = (uint64_t)with[0];
+		filter.categoryBits = (uint64_t)with[1];
+		ManyCastContext ctx;
+		ctx.world = this;
+		ctx.ignored[0] = with[2];
+		ctx.ignored[1] = with[3];
+		ctx.skip_start_inside = kind == 0;
+		if (kind == 0) {
+			b3World_CastRay(world_id, to_b3_pos(from), to_b3(to - from), filter, many_cast_cb, &ctx);
+		} else if (kind == 1) {
+			// shape_cast_sphere's proxy: one point at the origin, the radius round it.
+			b3Vec3 point = b3Vec3{ 0.0f, 0.0f, 0.0f };
+			b3ShapeProxy proxy;
+			proxy.points = &point;
+			proxy.count = 1;
+			proxy.radius = (float)row[1];
+			b3World_CastShape(world_id, to_b3_pos(from), &proxy, to_b3(to - from), filter, many_cast_cb, &ctx);
+		} else if (kind == 2) {
+			// PhysicsCasts' capsule: the cap centres half a body either side of from, less the radius.
+			const Vector3 lift = turn.xform(Vector3(0.0f, (real_t)(row[2] * 0.5 - row[1]), 0.0f));
+			const Box3DQueryProxy shape = capsule_proxy(from - lift, from + lift, (double)row[1]);
+			const b3ShapeProxy proxy = shape.proxy();
+			b3World_CastShape(world_id, shape.origin, &proxy, to_b3(to - from), filter, many_cast_cb, &ctx);
+		} else if (kind == 3) {
+			// PhysicsQuery.corners(): x outermost, then y, then z, each from minus to plus.
+			const Vector3 half = Vector3((real_t)row[1], (real_t)row[2], (real_t)row[3]) * 0.5f;
+			PackedVector3Array corners;
+			corners.resize(8);
+			int c = 0;
+			for (int sx = -1; sx <= 1; sx += 2) {
+				for (int sy = -1; sy <= 1; sy += 2) {
+					for (int sz = -1; sz <= 1; sz += 2) {
+						corners.set(c++, from + turn.xform(Vector3(sx < 0 ? -half.x : half.x, sy < 0 ? -half.y : half.y, sz < 0 ? -half.z : half.z)));
+					}
+				}
+			}
+			const Box3DQueryProxy shape = convex_proxy(corners);
+			const b3ShapeProxy proxy = shape.proxy();
+			b3World_CastShape(world_id, shape.origin, &proxy, to_b3(to - from), filter, many_cast_cb, &ctx);
+		} else {
+			UtilityFunctions::push_error("Box3DWorld.shape_cast_many: entry ", i, " names shape kind ", kind, "; 0 to 3 are known.");
+			continue;
+		}
+		if (!ctx.hit) {
+			continue;
+		}
+		float *o = out + i * SHAPE_CAST_FOUND;
+		const Vector3 point = to_gd_pos(ctx.point);
+		const Vector3 normal = to_gd(ctx.normal);
+		o[0] = 1.0f;
+		o[1] = ctx.fraction;
+		o[2] = point.x;
+		o[3] = point.y;
+		o[4] = point.z;
+		o[5] = normal.x;
+		o[6] = normal.y;
+		o[7] = normal.z;
+		if (ctx.body != nullptr) {
+			int64_t *w = out_who + i * SHAPE_CAST_WHO;
+			w[0] = (int64_t)ctx.body->get_collision_layer();
+			w[1] = ctx.body->get_cast_owner();
+			w[2] = (int64_t)ctx.body->get_instance_id();
+		}
+	}
+	// Into the reply only once written: an array already shared would copy on ptrw().
+	result.push_back(found);
+	result.push_back(who);
+	return result;
+}
+
 Array Box3DWorld::overlap_aabb(const AABB &p_aabb, uint64_t p_mask, uint64_t p_layer) {
 	join_async_step();
 	Array result;
@@ -2956,6 +3102,7 @@ void Box3DWorld::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("overlap_convex", "points", "collision_mask", "collision_layer"), &Box3DWorld::overlap_convex, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
 	ClassDB::bind_method(D_METHOD("shape_cast_capsule", "point_a", "point_b", "radius", "motion", "collision_mask", "collision_layer"), &Box3DWorld::shape_cast_capsule, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
 	ClassDB::bind_method(D_METHOD("shape_cast_convex", "points", "motion", "collision_mask", "collision_layer"), &Box3DWorld::shape_cast_convex, DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
+	ClassDB::bind_method(D_METHOD("shape_cast_many", "rows", "motions", "filters"), &Box3DWorld::shape_cast_many);
 	ClassDB::bind_method(D_METHOD("get_last_query_stats"), &Box3DWorld::get_last_query_stats);
 	ClassDB::bind_method(D_METHOD("set_contact_rules", "rules"), &Box3DWorld::set_contact_rules);
 	ClassDB::bind_method(D_METHOD("get_contact_rules"), &Box3DWorld::get_contact_rules);
