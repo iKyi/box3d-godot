@@ -1311,8 +1311,9 @@ void b3Shape_SetMeshMaterial( b3ShapeId shapeId, b3SurfaceMaterial surfaceMateri
 	b3World* world = b3GetWorld( shapeId.world0 );
 	b3Shape* shape = b3GetShape( world, shapeId );
 
+	// A compound reads a child's material from this same per-shape table (b3UpdateContact), so it
+	// takes the write too (Collapse patch).
 	B3_ASSERT( 0 <= index && index < shape->materialCount );
-	B3_ASSERT( shape->type != b3_compoundShape );
 
 	B3_REC( world, ShapeSetMeshMaterial, shapeId, surfaceMaterial, index );
 	b3GetShapeMaterials( shape )[index] = surfaceMaterial;

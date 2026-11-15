@@ -53,6 +53,10 @@ public:
 		// scale: b3CreateHeightFieldShape takes neither a transform nor a
 		// scale, and height_field_scale is upstream's own knob for it.
 		HEIGHT_FIELD = 8,
+		// A baked compound read from compound_boxes / compound_hulls, with no
+		// child node per piece (Collapse patch). Static bodies only, never a
+		// sensor, as every baked compound (src/shape.c:122-127).
+		COMPOUND = 9,
 	};
 
 	// b3HeightFieldDef.materialIndices entry that marks a cell as a hole
@@ -198,6 +202,25 @@ private:
 	// proxy, instead of one runtime shape per child. Static bodies only, and
 	// never a sensor — Box3D asserts both (src/shape.c:122-127).
 	bool baked_compound = false;
+	// --- shape_type COMPOUND (Collapse patch) ---
+	// The children of a baked compound read from packed arrays in body space,
+	// so a level's thousand boxes are one shape and one node, not a
+	// Box3DCollisionShape node apiece. Children are numbered boxes first, then
+	// hulls; each child's userMaterialId is its number, so a ray's
+	// user_material names the child and no two children share a material
+	// entry (which is what lets compound_surfaces write each in place).
+	// (centre, size) pairs, axis-aligned, size the whole extent.
+	PackedVector3Array compound_boxes;
+	// Each hull child's points, one run after another, counted by
+	// compound_hull_counts.
+	PackedVector3Array compound_hulls;
+	PackedInt32Array compound_hull_counts;
+	// (friction, restitution, rolling resistance) per child. Empty: every
+	// child takes the body's own friction, restitution and rolling_resistance.
+	PackedFloat32Array compound_surfaces;
+	// Each child's index into compound_data's material table, -1 for a hull
+	// run that made no hull. Filled at build, empty without a COMPOUND.
+	std::vector<int> compound_material_slots;
 	double linear_damping = 0.0;
 	double angular_damping = 0.05;
 	double gravity_scale = 1.0;
@@ -348,6 +371,17 @@ private:
 	// children describe no bakeable geometry, so the caller can fall back to the
 	// runtime compound.
 	bool create_baked_compound(const Transform3D &p_body_inv);
+	// shape_type COMPOUND: the baked compound compound_boxes and compound_hulls
+	// describe, attached as the body's one shape. Builds nothing (after a
+	// warning) on a body that is not static, a sensor, or one with no child.
+	void create_array_compound();
+	// A child's material as compound_surfaces (or the body) gives it.
+	b3SurfaceMaterial compound_material(int p_child) const;
+	// Writes every child's material into the built compound shape's own table
+	// (b3Shape_SetMeshMaterial): contacts re-read it each update (src/contact.c),
+	// so the next step grips by it. False when there is no array compound built.
+	bool write_compound_materials();
+	int compound_child_count() const;
 	// Builds the b3HeightFieldData for the current height_field_* properties.
 	// Returns nullptr (after a warning) if they do not describe a legal field.
 	// The caller owns the result and must b3DestroyHeightField it.
@@ -642,6 +676,16 @@ public:
 	// hull_count, mesh_count, sphere_count, shared_hull_count, shared_mesh_count,
 	// material_count, byte_count.
 	Dictionary get_compound_info() const;
+	void set_compound_boxes(const PackedVector3Array &p_boxes);
+	PackedVector3Array get_compound_boxes() const;
+	void set_compound_hulls(const PackedVector3Array &p_points);
+	PackedVector3Array get_compound_hulls() const;
+	void set_compound_hull_counts(const PackedInt32Array &p_counts);
+	PackedInt32Array get_compound_hull_counts() const;
+	// Live on a built COMPOUND: written in place, no rebuild. A length other
+	// than three a child is refused there with an error and nothing written.
+	void set_compound_surfaces(const PackedFloat32Array &p_surfaces);
+	PackedFloat32Array get_compound_surfaces() const;
 	void set_linear_damping(double p_damping);
 	double get_linear_damping() const;
 	void set_angular_damping(double p_damping);

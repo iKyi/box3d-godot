@@ -87,6 +87,7 @@ Box3DBody::~Box3DBody() {
 		b3DestroyCompound(compound_data);
 		compound_data = nullptr;
 	}
+	compound_material_slots.clear();
 }
 
 PackedStringArray Box3DBody::_get_configuration_warnings() const {
@@ -186,6 +187,12 @@ void Box3DBody::apply_filter() {
 }
 
 bool Box3DBody::apply_surface_material() {
+	// Collapse patch: Box3D asserts on a compound's own material setters
+	// (src/shape.c), so the body's material reaches a COMPOUND's children
+	// through its table; a child compound_surfaces covers keeps its own.
+	if (shape_type == COMPOUND) {
+		return write_compound_materials();
+	}
 	if (debug_has_child_shapes) {
 		return false;
 	}
@@ -324,6 +331,18 @@ void Box3DBody::create_in_world() {
 }
 
 void Box3DBody::build_shapes() {
+	// Collapse patch: a COMPOUND reads its children from the compound_* arrays
+	// and never from Box3DCollisionShape nodes.
+	compound_material_slots.clear();
+	if (shape_type == COMPOUND) {
+		create_array_compound();
+		debug_mass = b3Body_GetMass(body_id);
+		debug_has_child_shapes = false;
+		debug_min_ext = debug_min_extent();
+		debug_max_ext = debug_max_extent();
+		update_auto_visual();
+		return;
+	}
 	// Compound bodies: if there are Box3DCollisionShape children, build a shape
 	// for each and skip the body's own shape_type.
 	{
@@ -1326,6 +1345,183 @@ bool Box3DBody::create_baked_compound(const Transform3D &p_body_inv) {
 	return created;
 }
 
+int Box3DBody::compound_child_count() const {
+	return compound_boxes.size() / 2 + compound_hull_counts.size();
+}
+
+b3SurfaceMaterial Box3DBody::compound_material(int p_child) const {
+	b3SurfaceMaterial material = b3DefaultSurfaceMaterial();
+	const int at = p_child * 3;
+	if (compound_surfaces.size() == compound_child_count() * 3) {
+		material.friction = MAX(0.0f, compound_surfaces[at]);
+		material.restitution = MAX(0.0f, compound_surfaces[at + 1]);
+		material.rollingResistance = MAX(0.0f, compound_surfaces[at + 2]);
+	} else {
+		material.friction = MAX(0.0f, (float)friction);
+		material.restitution = MAX(0.0f, (float)restitution);
+		material.rollingResistance = MAX(0.0f, (float)rolling_resistance);
+	}
+	material.tangentVelocity = to_b3(tangent_velocity);
+	// The child's own number: no two children share a table entry (the
+	// compound merges materials only when every byte matches, src/compound.c),
+	// so each can be written in place, and a ray's user_material names it.
+	material.userMaterialId = (uint64_t)p_child;
+	return material;
+}
+
+void Box3DBody::create_array_compound() {
+	if (body_type != STATIC) {
+		UtilityFunctions::push_warning("Box3DBody: a COMPOUND is only allowed on static bodies; nothing was built.");
+		return;
+	}
+	if (is_sensor) {
+		UtilityFunctions::push_warning("Box3DBody: a COMPOUND cannot be a sensor; nothing was built.");
+		return;
+	}
+	if (compound_boxes.size() % 2 != 0) {
+		UtilityFunctions::push_warning("Box3DBody: compound_boxes holds (centre, size) pairs; its odd last entry is left out.");
+	}
+	const int box_count = compound_boxes.size() / 2;
+	const int hull_count = compound_hull_counts.size();
+	int hull_points = 0;
+	for (int h = 0; h < hull_count; ++h) {
+		if (compound_hull_counts[h] < 0) {
+			UtilityFunctions::push_warning(vformat("Box3DBody: compound hull %d counts %d points; nothing was built.", h, compound_hull_counts[h]));
+			return;
+		}
+		hull_points += compound_hull_counts[h];
+	}
+	if (hull_points != compound_hulls.size()) {
+		UtilityFunctions::push_warning(vformat("Box3DBody: compound_hull_counts add up to %d points and compound_hulls holds %d; nothing was built.", hull_points, compound_hulls.size()));
+		return;
+	}
+	const int children = box_count + hull_count;
+	if (children == 0) {
+		return;
+	}
+	// b3HullInstance.materialIndex is 16 bits and every child has an entry.
+	if (children > 0xFFFF) {
+		UtilityFunctions::push_warning(vformat("Box3DBody: a COMPOUND holds at most 65535 children, not %d; nothing was built.", children));
+		return;
+	}
+	if (!compound_surfaces.is_empty() && compound_surfaces.size() != children * 3) {
+		UtilityFunctions::push_warning(vformat("Box3DBody: compound_surfaces needs %d floats, three a child, and holds %d; every child takes the body's material.", children * 3, compound_surfaces.size()));
+	}
+	compound_material_slots.assign((size_t)children, -1);
+
+	// b3CompoundHullDef holds a POINTER, so neither store may reallocate while
+	// the defs are filled: reserved to the worst case, as create_baked_compound.
+	std::vector<b3BoxHull> box_hulls;
+	std::vector<b3HullData *> owned_hulls;
+	std::vector<b3CompoundHullDef> defs;
+	std::vector<int> child_of_def;
+	box_hulls.reserve((size_t)box_count);
+	owned_hulls.reserve((size_t)hull_count);
+	defs.reserve((size_t)children);
+	child_of_def.reserve((size_t)children);
+
+	// The node scale is baked into the geometry (P-024). An axis-aligned box
+	// stays one under any scale, and a hull is rebuilt from its scaled points.
+	for (int b = 0; b < box_count; ++b) {
+		const Vector3 centre = compound_boxes[b * 2] * node_scale;
+		const Vector3 half = (compound_boxes[b * 2 + 1] * node_scale * 0.5).abs();
+		if (half.x <= 0.0 || half.y <= 0.0 || half.z <= 0.0) {
+			UtilityFunctions::push_warning(vformat("Box3DBody: compound box %d has no volume; it is left out.", b));
+			continue;
+		}
+		// At the origin, placed by the transform: b3CreateCompound shares
+		// hulls by content (src/compound.c), so equal sizes store one.
+		box_hulls.push_back(b3MakeBoxHull((float)half.x, (float)half.y, (float)half.z));
+		b3CompoundHullDef def = {};
+		def.hull = &box_hulls.back().base;
+		def.transform = b3Transform_identity;
+		def.transform.p = to_b3(centre);
+		def.material = compound_material(b);
+		defs.push_back(def);
+		child_of_def.push_back(b);
+	}
+	int cursor = 0;
+	for (int h = 0; h < hull_count; ++h) {
+		const int count = compound_hull_counts[h];
+		std::vector<b3Vec3> points((size_t)count);
+		for (int i = 0; i < count; ++i) {
+			points[(size_t)i] = to_b3(compound_hulls[cursor + i] * node_scale);
+		}
+		cursor += count;
+		b3HullData *hull = count >= 4 ? b3CreateHull(points.data(), count, count < 255 ? count : 255) : nullptr;
+		if (hull == nullptr) {
+			UtilityFunctions::push_warning(vformat("Box3DBody: compound hull %d makes no hull from %d points; it is left out.", h, count));
+			continue;
+		}
+		owned_hulls.push_back(hull);
+		b3CompoundHullDef def = {};
+		def.hull = hull;
+		def.transform = b3Transform_identity;
+		def.material = compound_material(box_count + h);
+		defs.push_back(def);
+		child_of_def.push_back(box_count + h);
+	}
+
+	if (!defs.empty()) {
+		b3CompoundDef def = {};
+		def.hulls = defs.data();
+		def.hullCount = (int)defs.size();
+		compound_data = b3CreateCompound(&def);
+	}
+	// Copied into the blob (src/compound.c), so the originals go now.
+	for (size_t i = 0; i < owned_hulls.size(); ++i) {
+		b3DestroyHull(owned_hulls[i]);
+	}
+	if (compound_data == nullptr) {
+		if (!defs.empty()) {
+			UtilityFunctions::push_warning("Box3DBody: b3CreateCompound failed; nothing was built.");
+		}
+		compound_material_slots.clear();
+		return;
+	}
+	// Instance i is def i (src/compound.c fills hullInstances in def order).
+	for (size_t i = 0; i < defs.size(); ++i) {
+		compound_material_slots[(size_t)child_of_def[i]] = b3GetCompoundHull(compound_data, (int)i).materialIndex;
+	}
+
+	b3ShapeDef sd = b3DefaultShapeDef();
+	sd.orderKey = (uint64_t)order_key;
+	sd.density = (float)density;
+	sd.enableContactEvents = contact_monitor;
+	sd.filter = make_filter();
+	sd.isSensor = false;
+	sd.explosionScale = (float)explosion_scale;
+	sd.invokeContactCreation = invoke_contact_creation;
+	sd.enableSpeculativeContact = speculative_contact;
+	sd.enableSensorEvents = sensor_events;
+	sd.enableHitEvents = hit_events;
+	CharString node_name = String(get_name()).utf8();
+	sd.name = node_name.get_data();
+	// Box3D keeps the pointer (src/shape.c:126): compound_data is released
+	// with the shape, in destroy_body() or recreate_shapes().
+	b3CreateBakedCompoundShape(body_id, &sd, compound_data);
+}
+
+bool Box3DBody::write_compound_materials() {
+	if (shape_type != COMPOUND || compound_data == nullptr || compound_material_slots.empty()) {
+		return false;
+	}
+	std::vector<b3ShapeId> ids = own_shape_ids();
+	if (ids.size() != 1) {
+		return false;
+	}
+	// The shape's own copy of the compound's table (src/shape.c), which is
+	// what b3UpdateContact reads a child's material from; the blob keeps what
+	// it was built with and is rebuilt from compound_surfaces anyway.
+	for (size_t c = 0; c < compound_material_slots.size(); ++c) {
+		const int slot = compound_material_slots[c];
+		if (slot >= 0) {
+			b3Shape_SetMeshMaterial(ids[0], compound_material((int)c), slot);
+		}
+	}
+	return true;
+}
+
 bool Box3DBody::resize_child_shape(Box3DCollisionShape *p_shape) {
 	// A baked compound is one immutable shape; its children hold no handle.
 	if (compound_data != nullptr || p_shape == nullptr || !body_live()) {
@@ -1458,6 +1654,7 @@ void Box3DBody::destroy_body() {
 		b3DestroyCompound(compound_data);
 		compound_data = nullptr;
 	}
+	compound_material_slots.clear();
 }
 
 // Every shape goes and is built again from the current properties, on the SAME
@@ -2625,6 +2822,53 @@ Dictionary Box3DBody::get_compound_info() const {
 	return out;
 }
 
+void Box3DBody::set_compound_boxes(const PackedVector3Array &p_boxes) {
+	compound_boxes = p_boxes;
+	recreate_shapes();
+}
+
+PackedVector3Array Box3DBody::get_compound_boxes() const {
+	return compound_boxes;
+}
+
+void Box3DBody::set_compound_hulls(const PackedVector3Array &p_points) {
+	compound_hulls = p_points;
+	recreate_shapes();
+}
+
+PackedVector3Array Box3DBody::get_compound_hulls() const {
+	return compound_hulls;
+}
+
+void Box3DBody::set_compound_hull_counts(const PackedInt32Array &p_counts) {
+	compound_hull_counts = p_counts;
+	recreate_shapes();
+}
+
+PackedInt32Array Box3DBody::get_compound_hull_counts() const {
+	return compound_hull_counts;
+}
+
+// Geometry stays: only the table is written, so a live body keeps its
+// contacts, velocity and sleep, and the next step grips by the new numbers.
+void Box3DBody::set_compound_surfaces(const PackedFloat32Array &p_surfaces) {
+	if (shape_type == COMPOUND && compound_data != nullptr && body_live()) {
+		const int wanted = compound_child_count() * 3;
+		if (!p_surfaces.is_empty() && p_surfaces.size() != wanted) {
+			UtilityFunctions::push_error(vformat("Box3DBody: compound_surfaces needs %d floats, three a child, not %d; nothing was written.", wanted, p_surfaces.size()));
+			return;
+		}
+		compound_surfaces = p_surfaces;
+		write_compound_materials();
+		return;
+	}
+	compound_surfaces = p_surfaces;
+}
+
+PackedFloat32Array Box3DBody::get_compound_surfaces() const {
+	return compound_surfaces;
+}
+
 bool Box3DBody::get_speculative_contact() const {
 	return speculative_contact;
 }
@@ -3113,6 +3357,14 @@ void Box3DBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_baked_compound", "enabled"), &Box3DBody::set_baked_compound);
 	ClassDB::bind_method(D_METHOD("get_baked_compound"), &Box3DBody::get_baked_compound);
 	ClassDB::bind_method(D_METHOD("get_compound_info"), &Box3DBody::get_compound_info);
+	ClassDB::bind_method(D_METHOD("set_compound_boxes", "boxes"), &Box3DBody::set_compound_boxes);
+	ClassDB::bind_method(D_METHOD("get_compound_boxes"), &Box3DBody::get_compound_boxes);
+	ClassDB::bind_method(D_METHOD("set_compound_hulls", "points"), &Box3DBody::set_compound_hulls);
+	ClassDB::bind_method(D_METHOD("get_compound_hulls"), &Box3DBody::get_compound_hulls);
+	ClassDB::bind_method(D_METHOD("set_compound_hull_counts", "counts"), &Box3DBody::set_compound_hull_counts);
+	ClassDB::bind_method(D_METHOD("get_compound_hull_counts"), &Box3DBody::get_compound_hull_counts);
+	ClassDB::bind_method(D_METHOD("set_compound_surfaces", "surfaces"), &Box3DBody::set_compound_surfaces);
+	ClassDB::bind_method(D_METHOD("get_compound_surfaces"), &Box3DBody::get_compound_surfaces);
 	ClassDB::bind_method(D_METHOD("cast_ray", "from", "to", "body_transform", "collision_mask", "collision_layer"), &Box3DBody::cast_ray, DEFVAL(Transform3D()), DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
 	ClassDB::bind_method(D_METHOD("cast_box", "from", "to", "size", "body_transform", "collision_mask", "collision_layer"), &Box3DBody::cast_box, DEFVAL(Transform3D()), DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
 	ClassDB::bind_method(D_METHOD("overlaps_box", "center", "size", "body_transform", "collision_mask", "collision_layer"), &Box3DBody::overlaps_box, DEFVAL(Transform3D()), DEFVAL(B3_DEFAULT_MASK_BITS), DEFVAL(B3_DEFAULT_CATEGORY_BITS));
@@ -3176,7 +3428,7 @@ void Box3DBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_auto_visual"), &Box3DBody::get_auto_visual);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "body_type", PROPERTY_HINT_ENUM, "Static,Kinematic,Dynamic"), "set_body_type", "get_body_type");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "shape_type", PROPERTY_HINT_ENUM, "Box,Sphere,Capsule,Cylinder,Cone,Hull,Mesh,Fit Mesh,Height Field"), "set_shape_type", "get_shape_type");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shape_type", PROPERTY_HINT_ENUM, "Box,Sphere,Capsule,Cylinder,Cone,Hull,Mesh,Fit Mesh,Height Field,Compound"), "set_shape_type", "get_shape_type");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "box_size"), "set_box_size", "get_box_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sphere_radius", PROPERTY_HINT_RANGE, "0.01,100,0.01,or_greater"), "set_sphere_radius", "get_sphere_radius");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "capsule_radius", PROPERTY_HINT_RANGE, "0.01,100,0.01,or_greater"), "set_capsule_radius", "get_capsule_radius");
@@ -3235,6 +3487,12 @@ void Box3DBody::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "height_field_holes"), "set_height_field_holes", "get_height_field_holes");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "height_field_clockwise"), "set_height_field_clockwise", "get_height_field_clockwise");
 
+	ADD_GROUP("Compound", "compound_");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_VECTOR3_ARRAY, "compound_boxes"), "set_compound_boxes", "get_compound_boxes");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_VECTOR3_ARRAY, "compound_hulls"), "set_compound_hulls", "get_compound_hulls");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "compound_hull_counts"), "set_compound_hull_counts", "get_compound_hull_counts");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "compound_surfaces"), "set_compound_surfaces", "get_compound_surfaces");
+
 	ADD_GROUP("Surface Materials", "surface_");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "surface_materials", PROPERTY_HINT_ARRAY_TYPE, "Dictionary"), "set_surface_materials", "get_surface_materials");
 
@@ -3263,5 +3521,6 @@ void Box3DBody::_bind_methods() {
 	BIND_ENUM_CONSTANT(MESH);
 	BIND_ENUM_CONSTANT(FIT_MESH);
 	BIND_ENUM_CONSTANT(HEIGHT_FIELD);
+	BIND_ENUM_CONSTANT(COMPOUND);
 	BIND_CONSTANT(HEIGHT_FIELD_HOLE);
 }

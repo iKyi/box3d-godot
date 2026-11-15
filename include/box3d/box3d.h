@@ -933,7 +933,9 @@ B3_API b3SurfaceMaterial b3Shape_GetSurfaceMaterial( b3ShapeId shapeId );
 /// Get the number of mesh surface materials.
 B3_API int b3Shape_GetMeshMaterialCount( b3ShapeId shapeId );
 
-/// Set a surface material for a mesh shape.
+/// Set a surface material for a mesh, height field or compound shape. A compound's index is into
+/// its material table (b3CompoundHull.materialIndex); the shape owns a copy of that table, so the
+/// compound data itself is left as it was built.
 B3_API void b3Shape_SetMeshMaterial( b3ShapeId shapeId, b3SurfaceMaterial surfaceMaterial, int index );
 
 /// Get a surface material for a mesh shape
